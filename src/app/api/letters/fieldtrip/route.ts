@@ -17,14 +17,32 @@ type FieldTripPayload = {
   dismiss_place: string;
   destination: string;
   clothes: string;
-  items: string; // 改行入りテキスト
-  notes: string; // 改行入りテキスト
+  items: string;
+  notes: string;
   issued_at: string;
   teacher_name: string;
 };
 
 function normalizeNewlines(s: string) {
   return (s || "").replace(/\r\n/g, "\n");
+}
+
+function extractMultiErrors(err: any) {
+  const errors = err?.properties?.errors;
+  if (!Array.isArray(errors)) return null;
+
+  return errors.map((e: any) => ({
+    message: e?.message,
+    name: e?.name,
+    explanation: e?.properties?.explanation,
+    tag: e?.properties?.tag,
+    context: e?.properties?.context,
+    file: e?.properties?.file,
+    part: e?.properties?.part,
+    offset: e?.properties?.offset,
+    id: e?.properties?.id,
+    xtag: e?.properties?.xtag,
+  }));
 }
 
 export async function POST(req: Request) {
@@ -50,25 +68,30 @@ export async function POST(req: Request) {
       teacher_name: data.teacher_name ?? "",
     };
 
-    // ★ ここが「テンプレWord」を読み込む場所
+    // ✅ テンプレはプロジェクト直下 templates/fieldtrip.docx
     const templatePath = path.join(process.cwd(), "templates", "fieldtrip.docx");
     if (!fs.existsSync(templatePath)) {
       return NextResponse.json(
-        { error: "templates/fieldtrip.docx が見つかりません" },
+        { error: "templates/fieldtrip.docx が見つかりません", templatePath },
         { status: 500 }
       );
     }
 
+    // ✅ どのテンプレを読んでいるか確認（任意だけど便利）
+    const st = fs.statSync(templatePath);
+    console.log("[TEMPLATE]", templatePath);
+    console.log("[TEMPLATE] size =", st.size, "mtime =", st.mtime.toISOString());
+
     const content = fs.readFileSync(templatePath, "binary");
     const zip = new PizZip(content);
 
-    // linebreaks: true で、items/notes の改行がWordに反映される
+    // ★ ここが重要：{{ }} をタグとして扱う
     const doc = new Docxtemplater(zip, {
       paragraphLoop: true,
       linebreaks: true,
+      delimiters: { start: "{{", end: "}}" },
     });
 
-    // ★ Word内の {{title}} などを payload の値に置換する
     doc.render(payload);
 
     const buf = doc.getZip().generate({
@@ -78,7 +101,6 @@ export async function POST(req: Request) {
 
     const filename = `校外学習お便り_${payload.date || "日付未設定"}.docx`;
 
-    // ★ 生成したWordを「ファイルとして」返す
     return new NextResponse(buf, {
       status: 200,
       headers: {
@@ -90,10 +112,18 @@ export async function POST(req: Request) {
       },
     });
   } catch (err: any) {
+    const multi = extractMultiErrors(err);
+
+    console.error("DOCX ERROR message:", err?.message);
+    console.error("DOCX ERROR name:", err?.name);
+    console.error("DOCX ERROR properties:", err?.properties);
+    if (multi) console.error("DOCX MULTI (expanded):", JSON.stringify(multi, null, 2));
+
     return NextResponse.json(
       {
         error: "docx生成でエラーが発生しました",
         detail: err?.message ?? String(err),
+        multi,
       },
       { status: 500 }
     );
